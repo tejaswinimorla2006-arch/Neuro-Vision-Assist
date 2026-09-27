@@ -1,0 +1,66 @@
+{
+  "nodes": {
+    "main_gate":    { "label": "Main Gate",    "type": "outdoor", "lat": 12.9716, "lon": 77.5946 },
+    "reception":    { "label": "Reception",    "type": "indoor",  "lat": 12.97175, "lon": 77.5946 },
+    "block_a":      { "label": "Block A",      "type": "indoor"  },
+    "block_b":      { "label": "Block B",      "type": "indoor"  },
+    "block_c":      { "label": "Block C",      "type": "indoor"  },
+    "library":      { "label": "Library",      "type": "indoor"  },
+    "cafeteria":    { "label": "Cafeteria",    "type": "indoor"  },
+    "auditorium":   { "label": "Auditorium",   "type": "indoor"  },
+    "parking":      { "label": "Parking",      "type": "outdoor", "lat": 12.9716, "lon": 77.59478 },
+    "lift":         { "label": "Lift",         "type": "indoor"  },
+    "staircase":    { "label": "Staircase",    "type": "indoor"  },
+    "washroom":     { "label": "Washroom",     "type": "indoor"  },
+    "lab":          { "label": "Computer Lab", "type": "indoor"  },
+    "sports_ground":{ "label": "Sports Ground","type": "outdoor", "lat": 12.97205, "lon": 77.5946 },
+    "admin_office": { "label": "Admin Office", "type": "indoor"  }
+  },
+
+  "edges": [
+    { "from": "main_gate",    "to": "reception",    "distance": 30,  "direction": "straight" },
+    { "from": "main_gate",    "to": "parking",      "distance": 20,  "direction": "right"    },
+    { "from": "reception",    "to": "block_a",      "distance": 25,  "direction": "left"     },
+    { "from": "reception",    "to": "library",      "distance": 40,  "direction": "right"    },
+    { "from": "reception",    "to": "admin_office", "distance": 15,  "direction": "straight" },
+    { "from": "block_a",      "to": "block_b",      "distance": 20,  "direction": "straight" },
+    { "from": "block_a",      "to": "lift",         "distance": 10,  "direction": "right"    },
+    { "from": "block_a",      "to": "staircase",    "distance": 12,  "direction": "left"     },
+    { "from": "block_b",      "to": "block_c",      "distance": 20,  "direction": "straight" },
+    { "from": "block_b",      "to": "cafeteria",    "distance": 15,  "direction": "right"    },
+    { "from": "block_b",      "to": "washroom",     "distance": 8,   "direction": "left"     },
+    { "from": "block_c",      "to": "auditorium",   "distance": 25,  "direction": "straight" },
+    { "from": "block_c",      "to": "lab",          "distance": 18,  "direction": "left"     },
+    { "from": "library",      "to": "cafeteria",    "distance": 20,  "direction": "straight" },
+    { "from": "library",      "to": "block_a",      "distance": 35,  "direction": "left"     },
+    { "from": "cafeteria",    "to": "sports_ground","distance": 30,  "direction": "right"    },
+    { "from": "auditorium",   "to": "sports_ground","distance": 40,  "direction": "right"    },
+    { "from": "lift",         "to": "staircase",    "distance": 5,   "direction": "straight" },
+    { "from": "admin_office", "to": "block_a",      "distance": 20,  "direction": "left"     }
+  ],
+
+  "aliases": {
+    "gate":          "main_gate",
+    "entrance":      "main_gate",
+    "lobby":         "reception",
+    "front desk":    "reception",
+    "a block":       "block_a",
+    "b block":       "block_b",
+    "c block":       "block_c",
+    "canteen":       "cafeteria",
+    "food court":    "cafeteria",
+    "hall":          "auditorium",
+    "seminar hall":  "auditorium",
+    "toilet":        "washroom",
+    "restroom":      "washroom",
+    "computer lab":  "lab",
+    "ground":        "sports_ground",
+    "office":        "admin_office"
+  },
+
+  "outdoor_gps_fence": {
+    "lat":    12.9716,
+    "lon":    77.5946,
+    "radius_meters": 100
+  }
+}

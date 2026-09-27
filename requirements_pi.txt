@@ -1,3 +1,6 @@
 opencv-python
-ultralytics
 smbus2
+pyserial
+pynmea2
+pyttsx3
+ultralytics

@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+.DS_Store
+raspberry_pi/phone_gps_server.key
+raspberry_pi/phone_gps_server.crt

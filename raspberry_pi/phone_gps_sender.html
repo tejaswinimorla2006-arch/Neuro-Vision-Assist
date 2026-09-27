@@ -1,0 +1,36 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Neuro Vision GPS</title>
+<p id="status">Connecting...</p>
+<script>
+const status = document.getElementById("status");
+const endpoint = `${location.origin}/gps`;
+
+function send(position) {
+  const coords = position.coords;
+  fetch(endpoint, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+      accuracy: coords.accuracy,
+      speed: coords.speed,
+      heading: coords.heading,
+      timestamp: Date.now()
+    })
+  }).then(response => response.json()).then(result => {
+    status.textContent = result.accepted ? "GPS connected" : "GPS fix rejected";
+  }).catch(() => { status.textContent = "Pi disconnected; retrying..."; });
+}
+
+function failed(error) {
+  status.textContent = `GPS unavailable: ${error.message}`;
+}
+
+navigator.geolocation.watchPosition(send, failed, {
+  enableHighAccuracy: true,
+  maximumAge: 2000,
+  timeout: 10000
+});
+</script>

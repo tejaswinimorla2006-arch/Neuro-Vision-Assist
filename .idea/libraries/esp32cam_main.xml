@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="esp32cam-main">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/Required files/Arduino Code and lib/esp32cam-main.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

@@ -53,6 +53,54 @@ def receive_gps():
     return jsonify(accepted=True)
 
 
+@app.post("/nav")
+def receive_navigation():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(accepted=False, error="JSON object required"), 400
+
+    nav_type = payload.get("type")
+    instruction = payload.get("instruction")
+
+    if not nav_type:
+        return jsonify(accepted=False, error="Missing message type"), 400
+
+    print(f"[NAV RECEIVER] Event: {nav_type} | Instruction: '{instruction}' | Remaining: {payload.get('distance_remaining')}m")
+
+    # Speak navigation instructions using existing Pi speak() function
+    if instruction and isinstance(instruction, str) and instruction.strip():
+        try:
+            from main import speak
+            speak(instruction.strip())
+        except Exception as err:
+            print(f"[NAV RECEIVER] Note: speak() call exception: {err}")
+
+    # Store current navigation state for status queries
+    try:
+        nav_state_file = "/tmp/neuro_vision_phone_nav.json"
+        temp_file = f"{nav_state_file}.tmp"
+        with open(temp_file, "w") as f:
+            json.dump(payload, f)
+        os.replace(temp_file, nav_state_file)
+    except Exception as e:
+        print(f"[NAV RECEIVER] Warning: could not write nav state file: {e}")
+
+    return jsonify(accepted=True, status="Message received", type=nav_type)
+
+
+@app.get("/nav")
+def get_navigation_status():
+    nav_state_file = "/tmp/neuro_vision_phone_nav.json"
+    if os.path.exists(nav_state_file):
+        try:
+            with open(nav_state_file, "r") as f:
+                data = json.load(f)
+            return jsonify(active=True, nav_state=data)
+        except Exception:
+            pass
+    return jsonify(active=False, message="No active navigation state")
+
+
 if __name__ == "__main__":
     _ensure_certificate()
     app.run(host="0.0.0.0", port=8765,

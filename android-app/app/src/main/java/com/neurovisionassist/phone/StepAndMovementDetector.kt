@@ -1,7 +1,6 @@
 package com.neurovisionassist.phone
 
 import android.util.Log
-import kotlin.math.pow
 import kotlin.math.sqrt
 
 class StepAndMovementDetector(
@@ -10,6 +9,9 @@ class StepAndMovementDetector(
 ) {
     var isTesting = false
         private set
+
+    // Configurable step length (Default: 0.48m per stride)
+    var configurableStepLengthMeters: Float = AVERAGE_STEP_LENGTH
 
     private var stepCount = 0
     private var estimatedDistanceMeters = 0f
@@ -75,7 +77,7 @@ class StepAndMovementDetector(
         val accelMag = sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z)
         val gyroMag = if (gyro != null) sqrt(gyro.x * gyro.x + gyro.y * gyro.y + gyro.z * gyro.z) else 0f
 
-        // Exponential low-pass filter to smooth out high-frequency noise/shaking
+        // Exponential low-pass filter
         prevPrevFilteredAccel = prevFilteredAccel
         prevFilteredAccel = filteredAccel
         filteredAccel = ALPHA * filteredAccel + (1f - ALPHA) * accelMag
@@ -104,11 +106,9 @@ class StepAndMovementDetector(
             }
         }
 
-        // Track local min and max acceleration during step cycle
         if (filteredAccel < stepMinAccel) stepMinAccel = filteredAccel
         if (filteredAccel > stepMaxAccel) stepMaxAccel = filteredAccel
 
-        // Peak detection: local peak in filtered acceleration signal
         val isPeak = prevFilteredAccel > prevPrevFilteredAccel &&
                 prevFilteredAccel > filteredAccel &&
                 prevFilteredAccel > PEAK_THRESHOLD
@@ -117,13 +117,9 @@ class StepAndMovementDetector(
             val intervalNanos = timestampNanos - lastStepTimestampNanos
             val intervalMs = intervalNanos / 1_000_000
 
-            // Debounce / refractory period filtering (300 ms to 2500 ms)
             if (intervalMs in MIN_STEP_INTERVAL_MS..MAX_STEP_INTERVAL_MS) {
-                val accelDiff = (stepMaxAccel - stepMinAccel).coerceAtLeast(0.1f)
-
-                // Weinberg dynamic step length estimation: StepLength = K * (a_max - a_min)^(1/4)
-                val rawStepLength = WEINBERG_K * accelDiff.toDouble().pow(0.25).toFloat()
-                val stepLength = rawStepLength.coerceIn(MIN_STEP_LENGTH, MAX_STEP_LENGTH)
+                // Use configured stride length (0.48m per step)
+                val stepLength = configurableStepLengthMeters
 
                 stepCount++
                 estimatedDistanceMeters += stepLength
@@ -133,14 +129,12 @@ class StepAndMovementDetector(
 
                 Log.d(
                     TAG,
-                    "Step #$stepCount detected | Interval: ${intervalMs}ms | StepLength: ${"%.2f".format(stepLength)}m | " +
-                            "TotalDistance: ${"%.2f".format(estimatedDistanceMeters)}m | Heading: ${heading?.let { "%.1f".format(it) } ?: "--"} deg | State: $motionState",
+                    "Step #$stepCount detected | StepLength: ${"%.2f".format(stepLength)}m | " +
+                            "TotalDistance: ${"%.2f".format(estimatedDistanceMeters)}m | Heading: ${heading?.let { "%.1f".format(it) } ?: "--"} deg",
                 )
 
-                // Notify navigation waypoint tracker of detected step movement
                 onStepDetected?.invoke(stepLength)
 
-                // Reset min/max for next step cycle
                 stepMinAccel = filteredAccel
                 stepMaxAccel = filteredAccel
                 updateUi()
@@ -189,13 +183,11 @@ class StepAndMovementDetector(
 
     companion object {
         private const val TAG = "MovementTracker"
+        const val AVERAGE_STEP_LENGTH = 0.48f // Measured average stride length in metres
         private const val ALPHA = 0.75f
         private const val PEAK_THRESHOLD = 10.5f
         private const val MIN_STEP_INTERVAL_MS = 300L
         private const val MAX_STEP_INTERVAL_MS = 2500L
-        private const val WEINBERG_K = 0.42f
-        private const val MIN_STEP_LENGTH = 0.35f
-        private const val MAX_STEP_LENGTH = 1.15f
         private const val STATIONARY_VARIANCE_THRESHOLD = 0.25f
         private const val STATIONARY_GYRO_THRESHOLD = 0.5f
     }

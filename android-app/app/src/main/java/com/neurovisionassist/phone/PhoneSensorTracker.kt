@@ -6,6 +6,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.view.Surface
+import android.util.Log
 
 class PhoneSensorTracker(
     context: Context,
@@ -49,7 +50,9 @@ class PhoneSensorTracker(
     }
 
     fun stop() {
-        sensorManager.unregisterListener(this)
+        try {
+            sensorManager.unregisterListener(this)
+        } catch (_: Throwable) {}
         hasGravity = false
         hasMagneticField = false
     }
@@ -104,22 +107,35 @@ class PhoneSensorTracker(
     }
 
     private fun updateHeading(displayRotation: Int) {
-        if (!hasGravity || !hasMagneticField ||
-            !SensorManager.getRotationMatrix(rotationMatrix, null, gravityValues, magneticValues)
-        ) {
+        if (!hasGravity || !hasMagneticField) return
+
+        // Compute rotation matrix using accelerometer and magnetometer sensor fusion
+        if (!SensorManager.getRotationMatrix(rotationMatrix, null, gravityValues, magneticValues)) {
             return
         }
 
+        // Remap coordinate system for upright / vertical device usage (phone held in portrait view facing forward)
+        // AXIS_X to AXIS_X, AXIS_Y to AXIS_Z correctly projects device azimuth when held vertically facing forward.
         val (axisX, axisY) = when (displayRotation) {
             Surface.ROTATION_90 -> SensorManager.AXIS_Y to SensorManager.AXIS_MINUS_X
             Surface.ROTATION_180 -> SensorManager.AXIS_MINUS_X to SensorManager.AXIS_MINUS_Y
             Surface.ROTATION_270 -> SensorManager.AXIS_MINUS_Y to SensorManager.AXIS_X
-            else -> SensorManager.AXIS_X to SensorManager.AXIS_Y
+            else -> SensorManager.AXIS_X to SensorManager.AXIS_Z
         }
+
         SensorManager.remapCoordinateSystem(rotationMatrix, axisX, axisY, displayRotationMatrix)
         SensorManager.getOrientation(displayRotationMatrix, orientation)
-        val heading = ((Math.toDegrees(orientation[0].toDouble()).toFloat() + 360f) % 360f)
+
+        // Normalize heading between 0° and 359° clockwise from North
+        var heading = Math.toDegrees(orientation[0].toDouble()).toFloat()
+        heading = (heading % 360f + 360f) % 360f
+        
         currentHeading = heading
+        Log.d(TAG, "[COMPASS-DEBUG] Raw Accel: ${lastAccel?.x},${lastAccel?.y},${lastAccel?.z} | Mag: ${magneticValues[0]},${magneticValues[1]},${magneticValues[2]} | Heading: ${"%.1f".format(heading)}°")
         onReadings { copy(headingDegrees = heading) }
+    }
+
+    companion object {
+        private const val TAG = "PhoneSensorTracker"
     }
 }

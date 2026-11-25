@@ -27,7 +27,7 @@ data class RoutePlannerState(
     val expectedHeadingDegrees: Float? = null,
     val mapHeadingOffsetDegrees: Float = 0f,
     val offRouteWarning: String? = null,
-    val piHost: String = "192.168.118.202",
+    val piHost: String = "10.67.114.127",
     val piPort: Int = 8765,
     val piConnectionStatus: String = "Disconnected",
     val lastSentMessage: String = "None",

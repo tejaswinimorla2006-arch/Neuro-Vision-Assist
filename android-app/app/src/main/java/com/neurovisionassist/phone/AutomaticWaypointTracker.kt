@@ -1,77 +1,33 @@
 package com.neurovisionassist.phone
 
 import android.util.Log
-import kotlin.math.abs
 
 class AutomaticWaypointTracker(
     private val onStateUpdate: (TrackingUiState.() -> TrackingUiState) -> Unit,
     private val onSpeakInstruction: (String) -> Unit,
     private val onSendPiEvent: ((NavigationPayload) -> Unit)? = null,
 ) {
-    private var offRouteCount = 0
+    private fun safeLogD(tag: String, msg: String) {
+        try {
+            Log.d(tag, msg)
+        } catch (_: Throwable) {
+            println("[$tag] $msg")
+        }
+    }
 
     fun checkHeadingAndRoute(calibratedHeading: Float?, uiState: TrackingUiState) {
+        // Compass heading is tracked internally for orientation/debugging but does not generate spoken off-route alerts.
         val routePlanner = uiState.routePlanner
         if (!routePlanner.isNavigating || routePlanner.isPaused || calibratedHeading == null) return
-        val route = routePlanner.calculatedRoute ?: return
-        val steps = route.steps
-        val currentIndex = routePlanner.currentStepIndex
-        val currentStep = steps.getOrNull(currentIndex) ?: return
-
-        val expectedHeading = currentStep.headingDegrees
-        val headingDiff = abs(normalizeAngle(calibratedHeading - expectedHeading))
-
-        // Check for heading deviation when walking
-        if (uiState.movementTest.motionState == "Walking" && headingDiff > 60f) {
-            offRouteCount++
-            if (offRouteCount >= 10 && routePlanner.offRouteWarning == null) {
-                val correctionMsg = "Wrong heading. Face heading %.0f degrees.".format(expectedHeading)
-                Log.w(TAG, "Off-route warning: $correctionMsg (Current: %.1f, Expected: %.1f)".format(calibratedHeading, expectedHeading))
-
-                onStateUpdate {
-                    copy(
-                        routePlanner = routePlanner.copy(
-                            offRouteWarning = correctionMsg,
-                            expectedHeadingDegrees = expectedHeading,
-                        ),
-                    )
-                }
-
-                // Send correction event to Pi
-                onSendPiEvent?.invoke(
-                    NavigationPayload(
-                        type = "NAVIGATION_INSTRUCTION",
-                        instruction = correctionMsg,
-                        distanceRemainingMeters = routePlanner.remainingRouteDistanceMeters,
-                        currentLocation = currentStep.targetNodeName,
-                        nextLocation = steps.getOrNull(currentIndex + 1)?.targetNodeName ?: route.destinationNode.name,
-                        heading = calibratedHeading,
-                        expectedHeading = expectedHeading,
-                    ),
-                )
-            }
-        } else {
-            if (offRouteCount > 0) {
-                offRouteCount = 0
-                if (routePlanner.offRouteWarning != null) {
-                    onStateUpdate {
-                        copy(
-                            routePlanner = routePlanner.copy(
-                                offRouteWarning = null,
-                                expectedHeadingDegrees = expectedHeading,
-                            ),
-                        )
-                    }
-                }
-            } else {
-                onStateUpdate {
-                    copy(
-                        routePlanner = routePlanner.copy(
-                            expectedHeadingDegrees = expectedHeading,
-                        ),
-                    )
-                }
-            }
+        val currentStep = routePlanner.calculatedRoute?.steps?.getOrNull(routePlanner.currentStepIndex) ?: return
+        
+        onStateUpdate {
+            copy(
+                routePlanner = routePlanner.copy(
+                    expectedHeadingDegrees = currentStep.headingDegrees,
+                    offRouteWarning = null,
+                ),
+            )
         }
     }
 
@@ -82,13 +38,13 @@ class AutomaticWaypointTracker(
         val steps = route.steps
         val currentIndex = routePlanner.currentStepIndex
 
-        if (currentIndex >= steps.size - 1) return // Destination reached
+        if (currentIndex >= steps.size) return // Destination fully reached
 
         val currentStep = steps[currentIndex]
         val newWalkedOnStep = routePlanner.distanceWalkedOnCurrentStep + stepLength
         val targetDistance = currentStep.distanceMeters
 
-        val reachedWaypoint = targetDistance > 0f && (newWalkedOnStep >= targetDistance || (targetDistance - newWalkedOnStep) <= 0.35f)
+        val reachedWaypoint = targetDistance <= 0.05f || (newWalkedOnStep >= targetDistance || (targetDistance - newWalkedOnStep) <= 0.35f)
 
         val rawHeading = uiState.headingDegrees
         val currentHeading = if (rawHeading != null) ((rawHeading + routePlanner.mapHeadingOffsetDegrees) % 360f + 360f) % 360f else null
@@ -96,16 +52,19 @@ class AutomaticWaypointTracker(
         if (reachedWaypoint) {
             val nextIndex = currentIndex + 1
             val nextStep = steps.getOrNull(nextIndex)
-            val isFinalDestination = nextIndex >= steps.size - 1
+            val isFinalDestination = nextIndex >= steps.size
 
             val remainingDist = calculateRemainingDistance(steps, nextIndex, 0f)
 
-            Log.d(
+            safeLogD(
                 TAG,
                 "Waypoint Reached! Advanced from step $currentIndex (${currentStep.targetNodeName}) to step $nextIndex (${nextStep?.targetNodeName}). Walked: ${"%.2f".format(newWalkedOnStep)}m / ${"%.2f".format(targetDistance)}m",
             )
 
             val updatedInstruction = nextStep?.instruction ?: "Destination reached: ${route.destinationNode.name}."
+            val speechText = updatedInstruction.replace("\n", " ")
+
+            safeLogD(TAG, "[PI-STREAM] Instruction generated: $speechText (Step ${nextIndex + 1}/${steps.size})")
 
             onStateUpdate {
                 copy(
@@ -120,21 +79,23 @@ class AutomaticWaypointTracker(
                 )
             }
 
-            val speechText = updatedInstruction.replace("\n", " ")
             onSpeakInstruction(speechText)
 
-            // Send WAYPOINT_REACHED / NAVIGATION_COMPLETED event to Pi
-            onSendPiEvent?.invoke(
-                NavigationPayload(
-                    type = if (isFinalDestination) "NAVIGATION_COMPLETED" else "WAYPOINT_REACHED",
-                    instruction = speechText,
-                    distanceRemainingMeters = remainingDist,
-                    currentLocation = nextStep?.targetNodeName ?: route.destinationNode.name,
-                    nextLocation = steps.getOrNull(nextIndex + 1)?.targetNodeName ?: route.destinationNode.name,
-                    heading = currentHeading,
-                    expectedHeading = nextStep?.headingDegrees,
-                ),
+            val payload = NavigationPayload(
+                type = if (isFinalDestination) "NAVIGATION_COMPLETED" else "WAYPOINT_REACHED",
+                instruction = speechText,
+                distanceMeters = nextStep?.distanceMeters ?: 0f,
+                remainingDistanceMeters = remainingDist,
+                distanceWalkedStep = 0f,
+                stepDistance = nextStep?.distanceMeters ?: currentStep.distanceMeters,
+                currentStep = nextIndex + 1,
+                totalSteps = steps.size,
+                currentNode = nextStep?.targetNodeName ?: route.destinationNode.name,
+                nextNode = steps.getOrNull(nextIndex + 1)?.targetNodeName ?: route.destinationNode.name,
+                heading = currentHeading,
+                expectedHeading = nextStep?.headingDegrees,
             )
+            onSendPiEvent?.invoke(payload)
         } else {
             val remainingDist = calculateRemainingDistance(steps, currentIndex, newWalkedOnStep)
 
@@ -147,18 +108,21 @@ class AutomaticWaypointTracker(
                 )
             }
 
-            // Send DISTANCE_UPDATE event
-            onSendPiEvent?.invoke(
-                NavigationPayload(
-                    type = "DISTANCE_UPDATE",
-                    instruction = null,
-                    distanceRemainingMeters = remainingDist,
-                    currentLocation = currentStep.targetNodeName,
-                    nextLocation = steps.getOrNull(currentIndex + 1)?.targetNodeName ?: route.destinationNode.name,
-                    heading = currentHeading,
-                    expectedHeading = currentStep.headingDegrees,
-                ),
+            val payload = NavigationPayload(
+                type = "DISTANCE_UPDATE",
+                instruction = null, // DISTANCE_UPDATE updates remaining distance without repeating instruction text
+                distanceMeters = (currentStep.distanceMeters - newWalkedOnStep).coerceAtLeast(0f),
+                remainingDistanceMeters = remainingDist,
+                distanceWalkedStep = newWalkedOnStep,
+                stepDistance = currentStep.distanceMeters,
+                currentStep = currentIndex + 1,
+                totalSteps = steps.size,
+                currentNode = currentStep.targetNodeName,
+                nextNode = steps.getOrNull(currentIndex + 1)?.targetNodeName ?: route.destinationNode.name,
+                heading = currentHeading,
+                expectedHeading = currentStep.headingDegrees,
             )
+            onSendPiEvent?.invoke(payload)
         }
     }
 
@@ -173,12 +137,6 @@ class AutomaticWaypointTracker(
             total += steps[i].distanceMeters
         }
         return total
-    }
-
-    private fun normalizeAngle(angle: Float): Float {
-        var a = (angle % 360f + 360f) % 360f
-        if (a > 180f) a -= 360f
-        return a
     }
 
     companion object {

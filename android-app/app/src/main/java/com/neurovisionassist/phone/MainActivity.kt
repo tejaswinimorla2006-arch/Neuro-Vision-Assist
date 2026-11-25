@@ -3,8 +3,10 @@ package com.neurovisionassist.phone
 import android.Manifest
 import android.content.pm.PackageManager
 import android.opengl.GLSurfaceView
+import android.os.Build
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,6 +31,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var movementDetector: StepAndMovementDetector
     private lateinit var waypointTracker: AutomaticWaypointTracker
     private lateinit var piCommunicator: PiCommunicator
+    private var commandServer: PhoneCommandServer? = null
+    private var appHttpServer: AppHttpServer? = null
     private var sensorTracker: PhoneSensorTracker? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -51,15 +55,40 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        piCommunicator = PiCommunicator(lifecycleScope) { isConnected, statusText, lastSent, lastResp ->
-            updateState {
-                copy(
-                    routePlanner = routePlanner.copy(
-                        piConnectionStatus = statusText,
-                        lastSentMessage = lastSent,
-                        lastPiResponse = lastResp,
-                    ),
-                )
+        piCommunicator = PiCommunicator(
+            scope = lifecycleScope,
+            onConnectionStatusUpdate = { isConnected, statusText, lastSent, lastResp ->
+                updateState {
+                    copy(
+                        routePlanner = routePlanner.copy(
+                            piConnectionStatus = statusText,
+                            lastSentMessage = lastSent,
+                            lastPiResponse = lastResp,
+                        ),
+                    )
+                }
+            },
+            onStartNavigationTriggered = {
+                startNavigation()
+            },
+            onSetStartCallback = { startId ->
+                updateState {
+                    copy(routePlanner = routePlanner.copy(selectedStartNodeId = startId))
+                }
+            },
+            onSetDestinationCallback = { destId ->
+                updateState {
+                    copy(routePlanner = routePlanner.copy(selectedDestNodeId = destId))
+                }
+                calculateRoute()
+            }
+        )
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    requestPermissions(arrayOf(Manifest.permission.ACTIVITY_RECOGNITION), 101)
+                }
             }
         }
 
@@ -80,6 +109,102 @@ class MainActivity : ComponentActivity() {
                 waypointTracker.checkHeadingAndRoute(calHeading, uiState.value)
             }
         }, movementDetector)
+
+        // Start background command server on port 8888 for voice commands and Pi navigation requests
+        commandServer = PhoneCommandServer(
+            port = 8888,
+            onCommandReceived = { command ->
+                runOnUiThread { handleVoiceCommand(command) }
+            },
+            onNavigateRequested = { source, destination ->
+                val startId = IndoorMapRepository.resolveLocationId(source)
+                val destId = IndoorMapRepository.resolveLocationId(destination)
+                val routeResult = IndoorMapRepository.calculateShortestPath(startId, destId)
+                if (routeResult != null && routeResult.steps.isNotEmpty()) {
+                    runOnUiThread {
+                        updateState {
+                            copy(
+                                selectedTab = 0,
+                                routePlanner = routePlanner.copy(
+                                    selectedStartNodeId = routeResult.startNode.id,
+                                    selectedDestNodeId = routeResult.destinationNode.id,
+                                    calculatedRoute = routeResult,
+                                    currentStepIndex = 0,
+                                    distanceWalkedOnCurrentStep = 0f,
+                                    remainingRouteDistanceMeters = routeResult.totalDistanceMeters,
+                                    isNavigating = true,
+                                )
+                            )
+                        }
+                        tts?.speak("Navigation started from ${routeResult.startNode.name} to ${routeResult.destinationNode.name}.", TextToSpeech.QUEUE_FLUSH, null, "pi-nav")
+                    }
+                }
+                routeResult
+            }
+        ).apply { start() }
+
+        // Start AppHttpServer on port 8080 bound to 0.0.0.0 for Pi HTTP API (/ping, /navigate)
+        appHttpServer = AppHttpServer(
+            port = 8080,
+            onNavigateRequested = { source, destination ->
+                val startId = IndoorMapRepository.resolveLocationId(source)
+                val destId = IndoorMapRepository.resolveLocationId(destination)
+                val routeResult = IndoorMapRepository.calculateShortestPath(startId, destId)
+                val routeId = "route_${System.currentTimeMillis()}"
+                if (routeResult != null && routeResult.steps.isNotEmpty()) {
+                    runOnUiThread {
+                        updateState {
+                            copy(
+                                selectedTab = 0,
+                                isTracking = true,
+                                routePlanner = routePlanner.copy(
+                                    selectedStartNodeId = routeResult.startNode.id,
+                                    selectedDestNodeId = routeResult.destinationNode.id,
+                                    calculatedRoute = routeResult,
+                                    currentStepIndex = 0,
+                                    distanceWalkedOnCurrentStep = 0f,
+                                    remainingRouteDistanceMeters = routeResult.totalDistanceMeters,
+                                    isNavigating = true,
+                                )
+                            )
+                        }
+                        sensorTracker?.start(windowManager.defaultDisplay.rotation)
+                        movementDetector.startTest()
+                        tts?.speak("Navigation started from ${routeResult.startNode.name} to ${routeResult.destinationNode.name}.", TextToSpeech.QUEUE_FLUSH, null, "app-http-nav")
+                    }
+
+                    val currentHost = uiState.value.routePlanner.piHost
+                    val currentPort = uiState.value.routePlanner.piPort
+                    val firstStep = routeResult.steps.firstOrNull()
+                    val routeReadyPayload = NavigationPayload(
+                        type = "ROUTE_READY",
+                        instruction = firstStep?.instruction ?: "",
+                        distanceMeters = firstStep?.distanceMeters ?: 0f,
+                        remainingDistanceMeters = routeResult.totalDistanceMeters,
+                        stepDistance = firstStep?.distanceMeters ?: 0f,
+                        currentStep = 1,
+                        totalSteps = routeResult.steps.size,
+                        currentNode = routeResult.startNode.name,
+                        nextNode = firstStep?.targetNodeName ?: routeResult.destinationNode.name
+                    )
+                    piCommunicator.sendNavigationEvent(currentHost, currentPort, routeReadyPayload)
+
+                    val navStartedPayload = NavigationPayload(
+                        type = "NAVIGATION_STARTED",
+                        instruction = "Navigation started: ${routeResult.startNode.name} to ${routeResult.destinationNode.name}",
+                        distanceMeters = firstStep?.distanceMeters ?: 0f,
+                        remainingDistanceMeters = routeResult.totalDistanceMeters,
+                        stepDistance = firstStep?.distanceMeters ?: 0f,
+                        currentStep = 1,
+                        totalSteps = routeResult.steps.size,
+                        currentNode = routeResult.startNode.name,
+                        nextNode = firstStep?.targetNodeName ?: routeResult.destinationNode.name
+                    )
+                    piCommunicator.sendNavigationEvent(currentHost, currentPort, navStartedPayload)
+                }
+                if (routeResult != null) Pair(routeResult, routeId) else null
+            }
+        ).apply { start() }
 
         tts = TextToSpeech(this) { result ->
             ttsReady = result == TextToSpeech.SUCCESS
@@ -152,6 +277,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        commandServer?.stop()
+        commandServer = null
+        appHttpServer?.stop()
+        appHttpServer = null
         cameraView?.onPause()
         cameraView = null
         sensorTracker?.stop()
@@ -161,6 +290,58 @@ class MainActivity : ComponentActivity() {
         tts?.shutdown()
         tts = null
         super.onDestroy()
+    }
+
+    private fun handleVoiceCommand(commandText: String) {
+        val lower = commandText.lowercase().trim()
+        Log.d("MainActivity", "Processing voice command from Pi: '$commandText'")
+
+        when {
+            lower.contains("pause") -> pauseNavigation()
+            lower.contains("resume") -> resumeNavigation()
+            lower.contains("cancel") || lower.contains("stop navigation") -> cancelNavigation()
+            else -> {
+                // Find destination node in map matching voice command
+                val matchedNode = IndoorMapRepository.userLocations.firstOrNull { node ->
+                    lower.contains(node.name.lowercase()) || lower.contains(node.id.lowercase())
+                } ?: run {
+                    val alias = when {
+                        lower.contains("206") -> "LH-206"
+                        lower.contains("201") -> "LH-201"
+                        lower.contains("202") -> "LH-202"
+                        lower.contains("203") -> "LH-203"
+                        lower.contains("204") -> "LH-204"
+                        lower.contains("205") -> "LH-205"
+                        lower.contains("207") -> "LH-207"
+                        lower.contains("208") -> "L-208"
+                        lower.contains("209") -> "L-209"
+                        lower.contains("210") -> "L-210"
+                        lower.contains("211") -> "L-211"
+                        lower.contains("212") -> "L-212"
+                        lower.contains("213") -> "L-213"
+                        lower.contains("lounge") -> "Student Lounge"
+                        lower.contains("library") -> "Library"
+                        lower.contains("staff") -> "Staff Room"
+                        lower.contains("washroom") || lower.contains("toilet") -> "Washroom"
+                        lower.contains("balcony") -> "Balcony"
+                        lower.contains("lift") || lower.contains("elevator") -> "Lift"
+                        lower.contains("stairs") -> "Stairs"
+                        else -> null
+                    }
+                    alias?.let { name -> IndoorMapRepository.userLocations.firstOrNull { it.name == name } }
+                }
+
+                if (matchedNode != null) {
+                    updateState {
+                        copy(routePlanner = routePlanner.copy(selectedDestNodeId = matchedNode.id))
+                    }
+                    calculateRoute()
+                    startNavigation()
+                } else {
+                    Log.w("MainActivity", "Could not match destination for voice command: '$commandText'")
+                }
+            }
+        }
     }
 
     private fun startTracking() {
@@ -228,35 +409,54 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startNavigation() {
-        val route = uiState.value.routePlanner.calculatedRoute ?: return
-        sensorTracker?.start(windowManager.defaultDisplay.rotation)
-        movementDetector.startTest()
+        val routePlannerState = uiState.value.routePlanner
+        val startId = routePlannerState.selectedStartNodeId
+        val destId = routePlannerState.selectedDestNodeId
 
-        val firstStep = route.steps.firstOrNull()
-        val firstInstruction = firstStep?.instruction
+        // Recalculate and validate route from latest selected start and destination
+        val route = IndoorMapRepository.calculateShortestPath(startId, destId)
+        if (route == null || route.steps.isEmpty() || route.destinationNode.id != destId) {
+            Log.e("MainActivity", "startNavigation() aborted: Invalid, unreachable, or stale route from '$startId' to '$destId'.")
+            updateState {
+                copy(
+                    message = "Cannot start navigation: Invalid or unreachable route from $startId to $destId.",
+                    routePlanner = routePlanner.copy(isNavigating = false, calculatedRoute = null)
+                )
+            }
+            return
+        }
+
+        Log.d("MainActivity", "startNavigation() validated successfully. Start: $startId, Dest: $destId, Route Dest: ${route.destinationNode.name}, Total Dist: ${route.totalDistanceMeters}m")
 
         updateState {
             copy(
                 routePlanner = routePlanner.copy(
+                    calculatedRoute = route,
                     isNavigating = true,
                     isPaused = false,
                     currentStepIndex = 0,
                     distanceWalkedOnCurrentStep = 0f,
                     remainingRouteDistanceMeters = route.totalDistanceMeters,
-                    expectedHeadingDegrees = firstStep?.headingDegrees,
+                    expectedHeadingDegrees = route.steps.firstOrNull()?.headingDegrees,
                     offRouteWarning = null,
                 ),
             )
         }
 
-        // Send NAVIGATION_STARTED and first NAVIGATION_INSTRUCTION event to Pi
+        sensorTracker?.start(windowManager.defaultDisplay.rotation)
+        movementDetector.startTest()
+
+        val firstStep = route.steps.firstOrNull()
+        val firstInstruction = firstStep?.instruction
         val speechText = firstInstruction?.replace("\n", " ") ?: "Starting navigation."
+
         val payload = NavigationPayload(
             type = "NAVIGATION_STARTED",
             instruction = speechText,
-            distanceRemainingMeters = route.totalDistanceMeters,
-            currentLocation = route.startNode.name,
-            nextLocation = firstStep?.targetNodeName ?: route.destinationNode.name,
+            distanceMeters = firstStep?.distanceMeters ?: 0f,
+            remainingDistanceMeters = route.totalDistanceMeters,
+            currentNode = route.startNode.name,
+            nextNode = firstStep?.targetNodeName ?: route.destinationNode.name,
             heading = uiState.value.headingDegrees,
             expectedHeading = firstStep?.headingDegrees,
         )
@@ -272,13 +472,15 @@ class MainActivity : ComponentActivity() {
             )
         }
         val route = uiState.value.routePlanner.calculatedRoute
+        val currentStep = route?.steps?.getOrNull(uiState.value.routePlanner.currentStepIndex)
         sendEventToPi(
             NavigationPayload(
                 type = "NAVIGATION_PAUSED",
                 instruction = "Navigation paused.",
-                distanceRemainingMeters = uiState.value.routePlanner.remainingRouteDistanceMeters,
-                currentLocation = route?.startNode?.name ?: "",
-                nextLocation = route?.destinationNode?.name ?: "",
+                distanceMeters = currentStep?.distanceMeters ?: 0f,
+                remainingDistanceMeters = uiState.value.routePlanner.remainingRouteDistanceMeters,
+                currentNode = currentStep?.targetNodeName ?: route?.startNode?.name ?: "",
+                nextNode = route?.destinationNode?.name ?: "",
                 heading = uiState.value.headingDegrees,
             ),
         )
@@ -300,9 +502,10 @@ class MainActivity : ComponentActivity() {
             NavigationPayload(
                 type = "NAVIGATION_RESUMED",
                 instruction = instruction,
-                distanceRemainingMeters = uiState.value.routePlanner.remainingRouteDistanceMeters,
-                currentLocation = currentStep?.targetNodeName ?: route?.startNode?.name ?: "",
-                nextLocation = route?.destinationNode?.name ?: "",
+                distanceMeters = currentStep?.distanceMeters ?: 0f,
+                remainingDistanceMeters = uiState.value.routePlanner.remainingRouteDistanceMeters,
+                currentNode = currentStep?.targetNodeName ?: route?.startNode?.name ?: "",
+                nextNode = route?.destinationNode?.name ?: "",
                 heading = uiState.value.headingDegrees,
             ),
         )
@@ -325,9 +528,10 @@ class MainActivity : ComponentActivity() {
             NavigationPayload(
                 type = "NAVIGATION_CANCELLED",
                 instruction = "Navigation cancelled.",
-                distanceRemainingMeters = 0f,
-                currentLocation = route?.startNode?.name ?: "",
-                nextLocation = "",
+                distanceMeters = 0f,
+                remainingDistanceMeters = 0f,
+                currentNode = route?.startNode?.name ?: "",
+                nextNode = "",
                 heading = uiState.value.headingDegrees,
             ),
         )
@@ -350,9 +554,10 @@ class MainActivity : ComponentActivity() {
         val testPayload = NavigationPayload(
             type = "TEST_CONNECTION",
             instruction = "Testing connection to Raspberry Pi.",
-            distanceRemainingMeters = 0f,
-            currentLocation = "Phone",
-            nextLocation = "Raspberry Pi",
+            distanceMeters = 0f,
+            remainingDistanceMeters = 0f,
+            currentNode = "Phone",
+            nextNode = "Raspberry Pi",
             heading = uiState.value.headingDegrees,
         )
         piCommunicator.sendNavigationEvent(host, port, testPayload)
@@ -365,9 +570,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onLocalSpeakInstruction(text: String) {
-        // Log instruction locally; primary TTS is handled by Pi
         if (ttsReady) {
-            // Optional local feedback when debugging
             tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "local-nav")
         }
     }
@@ -486,6 +689,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startSensorOnlyMode(message: String? = null) {
         sensorTracker?.start(windowManager.defaultDisplay.rotation)
+        movementDetector.startTest()
         updateState {
             copy(
                 status = "Tracking active",
@@ -512,6 +716,7 @@ class MainActivity : ComponentActivity() {
     private fun stopTracking() {
         cameraView?.onPause()
         sensorTracker?.stop()
+        movementDetector.stopTest()
         runCatching { arSession?.pause() }
         arSession?.close()
         arSession = null
@@ -529,6 +734,7 @@ class MainActivity : ComponentActivity() {
                 poseY = null,
                 poseZ = null,
                 isTracking = false,
+                routePlanner = routePlanner.copy(isNavigating = false, isPaused = false),
                 message = null,
             )
         }
